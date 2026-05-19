@@ -319,7 +319,7 @@ BETA_COSINE = 0.6
 
 USE_LOCAL_SBERT = True
 
-LOCAL_CONTEXT_DOCS = 300
+LOCAL_CONTEXT_DOCS = 300 # Số lượng document context tối đa để lấy embedding local.
 
 LAMBDA_KEYWORD = 0.7
 
