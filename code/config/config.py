@@ -124,13 +124,13 @@ PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 # DATA DOWNLOAD
 # ======================================================
 
-DATASET_NAME = "dblp"
+DATASET_NAME = "amazon_fashion"
 
 DATASET_URL = (
     "https://drive.google.com/uc?id=1GbxKrxrmFrKt5vgDHP1xe1Qr_rfvR1jh"
 )
 
-DATASET_ZIP_NAME = "dblp.zip"
+DATASET_ZIP_NAME = "amazon_fashion.zip"
 
 # Alias để tương thích code cũ
 DATA_URL = DATASET_URL
@@ -232,8 +232,7 @@ BASE_SBERT_MODEL = SBERT_MODEL
 
 FINETUNED_MODEL_DIR = os.path.join(
     MODEL_DIR,
-    "sbert_dblp_finetuned",
-    # "sbert_amazon_electronics_finetuned",
+    "sbert_amazon_fashion_finetuned",
 )
 
 # Không nên để 100 hoặc 500 epoch.
@@ -246,7 +245,7 @@ LEARNING_RATE = 2e-5
 
 WARMUP_RATIO = 0.1
 
-MAX_TRAIN_PAIRS = 200000
+MAX_TRAIN_PAIRS = 100000
 
 PAIR_WINDOW_SIZE = 5
 
@@ -257,7 +256,7 @@ PAIR_WINDOW_SIZE = 5
 # Root dùng KMeans để chia các nhánh lớn tương đối cân bằng,
 # gần với tinh thần Spherical KMeans của TaxoGen gốc.
 
-ROOT_N_CLUSTERS = 6
+ROOT_N_CLUSTERS = 5
 
 
 # ======================================================
@@ -265,7 +264,7 @@ ROOT_N_CLUSTERS = 6
 # ======================================================
 # Các node con dùng HDBSCAN để tách sub-topic tự nhiên và xử lý noise.
 
-MIN_CLUSTER_SIZE = 10
+MIN_CLUSTER_SIZE = 8
 
 MIN_SAMPLES = 1
 
@@ -319,7 +318,7 @@ BETA_COSINE = 0.6
 
 USE_LOCAL_SBERT = True
 
-LOCAL_CONTEXT_DOCS = 300 # Số lượng document context tối đa để lấy embedding local.
+LOCAL_CONTEXT_DOCS = 300  # Số lượng document context tối đa để lấy embedding local.
 
 LAMBDA_KEYWORD = 0.7
 
@@ -338,7 +337,7 @@ LOCAL_FINE_TUNE_BATCH_SIZE = 64
 
 LOCAL_FINE_TUNE_LR = 2e-5
 
-LOCAL_MAX_TRAIN_PAIRS = 10000
+LOCAL_MAX_TRAIN_PAIRS = 20000
 
 LOCAL_MIN_TRAIN_PAIRS = 100
 
