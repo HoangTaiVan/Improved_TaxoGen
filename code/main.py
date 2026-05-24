@@ -3,12 +3,13 @@ import sys
 import time
 import subprocess
 
-
 from config.config import (
     ROOT_DIR,
 
     PAPERS_FILE,
     KEYWORDS_FILE,
+    KEYWORD_CNT_FILE,
+    INDEX_FILE,
 
     OUTPUT_DIR,
     EMBEDDING_DIR,
@@ -32,6 +33,8 @@ from config.config import (
     DEVICE,
     GPU_NAME,
 )
+
+from common.dataset import DataSet
 
 
 # ======================================================
@@ -71,26 +74,30 @@ FINETUNE_SCRIPT = os.path.join(
 def ensure_dirs():
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
     os.makedirs(EMBEDDING_DIR, exist_ok=True)
-
     os.makedirs(TREE_DIR, exist_ok=True)
-
     os.makedirs(TAXONOMY_DIR, exist_ok=True)
-
     os.makedirs(HF_HOME, exist_ok=True)
+
+    os.makedirs(
+        os.path.dirname(KEYWORD_CNT_FILE),
+        exist_ok=True,
+    )
+
+    os.makedirs(
+        os.path.dirname(INDEX_FILE),
+        exist_ok=True,
+    )
 
 
 def check_inputs():
 
     if not os.path.exists(PAPERS_FILE):
-
         raise FileNotFoundError(
             f"Không thấy file papers.txt:\n{PAPERS_FILE}"
         )
 
     if not os.path.exists(KEYWORDS_FILE):
-
         raise FileNotFoundError(
             f"Không thấy file keywords.txt:\n{KEYWORDS_FILE}"
         )
@@ -99,9 +106,7 @@ def check_inputs():
 def run_step(name, cmd):
 
     print("\n" + "=" * 80)
-
     print(f"[RUNNING] {name}")
-
     print("=" * 80)
 
     start = time.time()
@@ -112,14 +117,47 @@ def run_step(name, cmd):
     )
 
     if result.returncode != 0:
-
         print(f"[ERROR] Step failed: {name}")
-
         sys.exit(result.returncode)
 
     print(f"[DONE] {name}")
-
     print(f"[TIME] {time.time() - start:.2f}s")
+
+
+def build_intermediate_files():
+
+    print("\n" + "=" * 80)
+    print("[STEP 1.5] Build intermediate data files")
+    print("=" * 80)
+
+    dataset = DataSet(
+        document_file=PAPERS_FILE,
+        keyword_file=KEYWORDS_FILE,
+    )
+
+    if not os.path.exists(KEYWORD_CNT_FILE):
+
+        print("[BUILD] keyword_cnt.txt")
+        print(f"[OUTPUT] {KEYWORD_CNT_FILE}")
+
+        dataset.build_keyword_cnt_file(
+            KEYWORD_CNT_FILE
+        )
+
+    else:
+        print(f"[SKIP] keyword_cnt.txt exists:\n{KEYWORD_CNT_FILE}")
+
+    if not os.path.exists(INDEX_FILE):
+
+        print("[BUILD] index.txt")
+        print(f"[OUTPUT] {INDEX_FILE}")
+
+        dataset.build_index_file(
+            INDEX_FILE
+        )
+
+    else:
+        print(f"[SKIP] index.txt exists:\n{INDEX_FILE}")
 
 
 # ======================================================
@@ -164,7 +202,7 @@ def main():
                 )
 
             run_step(
-                "0. Fine-tune SBERT on DBLP",
+                "0. Fine-tune SBERT",
                 [
                     python,
                     FINETUNE_SCRIPT,
@@ -195,6 +233,12 @@ def main():
             f"[SKIP] Embedding exists:\n"
             f"{EMBEDDING_FILE}"
         )
+
+    # ======================================================
+    # STEP 1.5: AUTO BUILD DATA FILES
+    # ======================================================
+
+    build_intermediate_files()
 
     # ======================================================
     # STEP 2: BUILD TAXONOMY
@@ -235,25 +279,17 @@ def main():
         ],
     )
 
-    # ======================================================
-    # FINISH
-    # ======================================================
-
     print("\n" + "=" * 80)
-
     print("[SUCCESS] Improved TaxoGen finished")
-
     print("=" * 80)
 
-    print(f"SBERT model   : {SBERT_MODEL}")
-
-    print(f"Embedding txt : {EMBEDDING_FILE}")
-
-    print(f"Tree folder   : {TREE_DIR}")
-
-    print(f"Taxonomy txt  : {TAXONOMY_TXT}")
-
-    print(f"Taxonomy json : {TAXONOMY_JSON}")
+    print(f"SBERT model     : {SBERT_MODEL}")
+    print(f"Embedding txt   : {EMBEDDING_FILE}")
+    print(f"Keyword cnt txt : {KEYWORD_CNT_FILE}")
+    print(f"Index txt       : {INDEX_FILE}")
+    print(f"Tree folder     : {TREE_DIR}")
+    print(f"Taxonomy txt    : {TAXONOMY_TXT}")
+    print(f"Taxonomy json   : {TAXONOMY_JSON}")
 
 
 if __name__ == "__main__":

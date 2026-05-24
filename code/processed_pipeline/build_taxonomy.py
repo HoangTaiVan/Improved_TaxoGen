@@ -30,11 +30,6 @@ from config.config import (
     TOP_K,
 )
 
-# ======================================================
-# OPTIONAL CONFIG VALUES
-# Các tham số này nên đặt ở config.py để dễ chỉnh.
-# Nếu config.py chưa có, code sẽ dùng default an toàn.
-# ======================================================
 try:
     from config.config import MIN_SAMPLES
 except Exception:
@@ -43,7 +38,7 @@ except Exception:
 try:
     from config.config import ROOT_N_CLUSTERS
 except Exception:
-    ROOT_N_CLUSTERS = 8
+    ROOT_N_CLUSTERS = 5
 
 try:
     from config.config import ALPHA_BM25, BETA_COSINE
@@ -62,10 +57,6 @@ from processed_pipeline.local_sbert_training import (
     build_local_embeddings_for_node,
 )
 
-
-# ======================================================
-# GLOBAL SBERT MODEL
-# ======================================================
 
 _SBERT_MODEL = None
 
@@ -99,12 +90,16 @@ def save_node_text(doc_ids, documents, path):
 
     with open(path, "w", encoding="utf-8") as f:
         for doc_id in doc_ids:
-            if doc_id < 0 or doc_id >= len(documents):
-                continue
-            f.write(" ".join(documents[doc_id]) + "\n")
+            if 0 <= doc_id < len(documents):
+                f.write(" ".join(documents[doc_id]) + "\n")
 
 
 def save_node_embeddings(keywords, embeddings, path):
+    """
+    Save embeddings.txt format:
+        vocab_size dim
+        keyword v1 v2 ...
+    """
     ensure_parent_dir(path)
 
     with open(path, "w", encoding="utf-8") as f:
@@ -112,11 +107,17 @@ def save_node_embeddings(keywords, embeddings, path):
             f.write("0 0\n")
             return
 
+        embeddings = np.asarray(embeddings, dtype=np.float32)
+
+        if embeddings.ndim != 2:
+            f.write("0 0\n")
+            return
+
         dim = embeddings.shape[1]
         f.write(f"{len(keywords)} {dim}\n")
 
         for kw, vec in zip(keywords, embeddings):
-            vec_str = " ".join([str(float(x)) for x in vec])
+            vec_str = " ".join(str(float(x)) for x in vec)
             f.write(f"{kw} {vec_str}\n")
 
 
@@ -131,6 +132,43 @@ def save_score_files(scores, score_file, caseolap_file):
     with open(caseolap_file, "w", encoding="utf-8") as cf:
         for kw, score in scores:
             cf.write(f"{kw}\t{score:.6f}\n")
+
+
+# ======================================================
+# LOAD NODE EMBEDDINGS
+# ======================================================
+
+def load_node_embeddings(seed_keywords, node_embedding_file, min_cluster_size):
+    """
+    TaxoGen-style:
+        Mỗi node dùng embeddings.txt nằm trong chính node đó.
+
+    Root:
+        root/embeddings.txt = global SBERT
+
+    Child:
+        child/embeddings.txt = local SBERT do parent tạo trước khi recur(child)
+    """
+    if not os.path.exists(node_embedding_file):
+        print(f"[STOP] missing node embeddings: {node_embedding_file}")
+        return [], np.array([])
+
+    embedding_map = load_txt_embeddings(node_embedding_file)
+
+    valid_keywords = [
+        kw for kw in seed_keywords
+        if kw in embedding_map
+    ]
+
+    if len(valid_keywords) < min_cluster_size * 2:
+        return valid_keywords, np.array([])
+
+    node_embeddings = np.array(
+        [embedding_map[kw] for kw in valid_keywords],
+        dtype=np.float32,
+    )
+
+    return valid_keywords, node_embeddings
 
 
 # ======================================================
@@ -164,25 +202,17 @@ def minmax_normalize(score_map):
 
 
 def build_node_keyword_stats(doc_ids, documents):
-    """
-    Tính TF/DF trong phạm vi node hiện tại.
-    Dùng cho BM25 thay cho CaseOLAP gốc.
-    """
     keyword_tf = Counter()
     keyword_df = Counter()
     doc_lens = []
 
     for doc_id in doc_ids:
-        if doc_id < 0 or doc_id >= len(documents):
-            continue
-
-        doc = documents[doc_id]
-        if not doc:
-            continue
-
-        keyword_tf.update(doc)
-        keyword_df.update(set(doc))
-        doc_lens.append(len(doc))
+        if 0 <= doc_id < len(documents):
+            doc = documents[doc_id]
+            if doc:
+                keyword_tf.update(doc)
+                keyword_df.update(set(doc))
+                doc_lens.append(len(doc))
 
     n_docs = len(doc_lens)
     avg_doc_len = float(np.mean(doc_lens)) if doc_lens else 0.0
@@ -206,8 +236,6 @@ def bm25_keyword_score(
         return 0.0
 
     idf = np.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
-
-    # Dùng TF tổng trong node, chuẩn hóa đơn giản bằng avg length.
     denom = tf + k1 * (1.0 - b + b * 1.0)
 
     if denom <= 0:
@@ -228,19 +256,16 @@ def rank_cluster_keywords(
     beta=BETA_COSINE,
     return_scores=False,
 ):
-    """
-    Representative ranking = BM25 + Cosine.
-    - Cosine: keyword gần centroid cluster.
-    - BM25: keyword quan trọng trong documents của node.
-    """
     valid_keywords = [kw for kw in cluster_keywords if kw in keyword_to_id]
 
     if len(valid_keywords) == 0:
-        if return_scores:
-            return []
-        return cluster_keywords[:top_k]
+        return [] if return_scores else cluster_keywords[:top_k]
 
-    vecs = np.array([embeddings[keyword_to_id[kw]] for kw in valid_keywords])
+    vecs = np.array(
+        [embeddings[keyword_to_id[kw]] for kw in valid_keywords],
+        dtype=np.float32,
+    )
+
     centroid = np.mean(vecs, axis=0)
 
     cosine_scores = {
@@ -248,15 +273,12 @@ def rank_cluster_keywords(
         for kw in valid_keywords
     }
 
-    # Nếu không có context document thì fallback cosine-only.
     if node_stats is None:
         if doc_ids is not None and documents is not None:
             node_stats = build_node_keyword_stats(doc_ids, documents)
         else:
             ranked = sorted(cosine_scores.items(), key=lambda x: x[1], reverse=True)
-            if return_scores:
-                return ranked[:top_k]
-            return [kw for kw, _ in ranked[:top_k]]
+            return ranked[:top_k] if return_scores else [kw for kw, _ in ranked[:top_k]]
 
     keyword_tf, keyword_df, n_docs, avg_doc_len = node_stats
 
@@ -275,16 +297,14 @@ def rank_cluster_keywords(
     cosine_norm = minmax_normalize(cosine_scores)
 
     hybrid_scores = {
-        kw: alpha * bm25_norm.get(kw, 0.0) + beta * cosine_norm.get(kw, 0.0)
+        kw: alpha * bm25_norm.get(kw, 0.0)
+        + beta * cosine_norm.get(kw, 0.0)
         for kw in valid_keywords
     }
 
     ranked = sorted(hybrid_scores.items(), key=lambda x: x[1], reverse=True)
 
-    if return_scores:
-        return ranked[:top_k]
-
-    return [kw for kw, _ in ranked[:top_k]]
+    return ranked[:top_k] if return_scores else [kw for kw, _ in ranked[:top_k]]
 
 
 def choose_node_label(
@@ -316,6 +336,7 @@ def choose_node_label(
 
     fallback = f"cluster_{cluster_id}"
     idx = 1
+
     while fallback in used_labels:
         fallback = f"cluster_{cluster_id}_{idx}"
         idx += 1
@@ -325,14 +346,10 @@ def choose_node_label(
 
 
 # ======================================================
-# CLUSTERING: ROOT KMEANS / CHILD HDBSCAN
+# CLUSTERING
 # ======================================================
 
-def cluster_keywords_kmeans(keywords, embeddings, n_clusters=8):
-    """
-    Root dùng KMeans trên vector đã normalize.
-    Gần với tinh thần Spherical KMeans của TaxoGen gốc.
-    """
+def cluster_keywords_kmeans(keywords, embeddings, n_clusters=5):
     if len(keywords) < n_clusters:
         return None
 
@@ -358,17 +375,15 @@ def cluster_keywords_kmeans(keywords, embeddings, n_clusters=8):
 
 
 def reassign_noise_to_nearest_cluster(labels, embeddings):
-    """
-    HDBSCAN sinh noise = -1.
-    Gán noise về centroid gần nhất để không mất quá nhiều keyword.
-    """
     labels = np.array(labels, dtype=int)
 
     valid_labels = sorted([int(x) for x in set(labels) if int(x) != -1])
+
     if len(valid_labels) == 0:
         return labels
 
     centroids = {}
+
     for label in valid_labels:
         members = embeddings[labels == label]
         if len(members) > 0:
@@ -383,6 +398,7 @@ def reassign_noise_to_nearest_cluster(labels, embeddings):
 
         for label, centroid in centroids.items():
             score = cossim(vec, centroid)
+
             if score > best_score:
                 best_score = score
                 best_label = label
@@ -411,13 +427,13 @@ def cluster_keywords_hdbscan(keywords, embeddings, min_cluster_size=MIN_CLUSTER_
     )
 
     raw_labels = clusterer.fit_predict(embeddings)
+
     valid = [x for x in set(raw_labels) if x != -1]
 
     if len(valid) == 0:
         return None
 
-    labels = reassign_noise_to_nearest_cluster(raw_labels, embeddings)
-    return labels
+    return reassign_noise_to_nearest_cluster(raw_labels, embeddings)
 
 
 def cluster_keywords_auto(
@@ -426,11 +442,6 @@ def cluster_keywords_auto(
     depth,
     min_cluster_size=MIN_CLUSTER_SIZE,
 ):
-    """
-    Hybrid clustering:
-    - depth = 0: KMeans để root có k nhánh lớn ổn định.
-    - depth > 0: HDBSCAN để tách subtopic tự nhiên.
-    """
     if depth == 0:
         return cluster_keywords_kmeans(
             keywords=keywords,
@@ -459,23 +470,21 @@ def adaptive_filter_keywords(
     min_keywords_after_filter=MIN_KEYWORDS_AFTER_FILTER,
     node_stats=None,
 ):
-    """
-    Adaptive Filtering:
-    cluster -> BM25+Cosine rank -> filter -> recluster.
-    Đây là phần thay thế tinh thần CaseOLAP filtering trong TaxoGen gốc.
-    """
     cluster_map = defaultdict(list)
 
     for kw, label in zip(valid_keywords, labels):
         label = int(label)
-        if label == -1:
-            continue
-        cluster_map[label].append(kw)
+        if label != -1:
+            cluster_map[label].append(kw)
 
     if len(cluster_map) == 0:
         return valid_keywords, node_embeddings
 
-    node_keyword_to_id = {kw: idx for idx, kw in enumerate(valid_keywords)}
+    node_keyword_to_id = {
+        kw: idx
+        for idx, kw in enumerate(valid_keywords)
+    }
+
     kept_keywords = []
 
     for _, cluster_keywords in cluster_map.items():
@@ -483,6 +492,7 @@ def adaptive_filter_keywords(
             min_keywords_after_filter,
             int(len(cluster_keywords) * top_keep_ratio),
         )
+
         keep_n = min(keep_n, len(cluster_keywords))
 
         ranked = rank_cluster_keywords(
@@ -499,11 +509,11 @@ def adaptive_filter_keywords(
 
     kept_keywords = list(dict.fromkeys(kept_keywords))
 
-    # Không lọc nếu kết quả quá ít.
     if len(kept_keywords) < min_keywords_after_filter:
         return valid_keywords, node_embeddings
 
     kept_set = set(kept_keywords)
+
     new_keywords = []
     new_embeddings = []
 
@@ -512,7 +522,7 @@ def adaptive_filter_keywords(
             new_keywords.append(kw)
             new_embeddings.append(emb)
 
-    return new_keywords, np.array(new_embeddings)
+    return new_keywords, np.array(new_embeddings, dtype=np.float32)
 
 
 # ======================================================
@@ -530,11 +540,15 @@ def assign_docs_to_clusters(doc_ids, documents, keywords, labels):
     cluster_docs = defaultdict(list)
 
     for doc_id in doc_ids:
-        if doc_id < 0 or doc_id >= len(documents):
+        if not (0 <= doc_id < len(documents)):
             continue
 
         doc = documents[doc_id]
-        score = {cid: 0 for cid in valid_clusters}
+
+        score = {
+            cid: 0
+            for cid in valid_clusters
+        }
 
         for token in doc:
             if token in keyword_cluster:
@@ -544,6 +558,7 @@ def assign_docs_to_clusters(doc_ids, documents, keywords, labels):
             continue
 
         best_cluster = max(score, key=score.get)
+
         if score[best_cluster] > 0:
             cluster_docs[best_cluster].append(doc_id)
 
@@ -551,52 +566,72 @@ def assign_docs_to_clusters(doc_ids, documents, keywords, labels):
 
 
 # ======================================================
-# EMBEDDING SELECTION: GLOBAL / LOCAL
+# CHILD LOCAL EMBEDDING
 # ======================================================
 
-def get_node_embeddings(
-    depth,
-    doc_ids,
-    seed_keywords,
+def build_child_embeddings(
+    child_keywords,
+    child_doc_ids,
     documents,
-    keyword_to_id,
+    global_keyword_to_id,
     global_embeddings,
-    min_cluster_size,
+    child_embedding_file,
 ):
-    valid_keywords = [kw for kw in seed_keywords if kw in keyword_to_id]
+    """
+    TaxoGen-style:
+        Parent tạo local embeddings.txt cho child
+        trước khi gọi recursive_build(child).
+    """
+    valid_child_keywords = [
+        kw for kw in child_keywords
+        if kw in global_keyword_to_id
+    ]
 
-    if len(valid_keywords) < min_cluster_size * 2:
-        return [], np.array([])
+    if len(valid_child_keywords) == 0:
+        save_node_embeddings([], np.array([]), child_embedding_file)
+        return []
 
-    # Root node -> global SBERT
-    if depth == 0 or not USE_LOCAL_SBERT:
-        node_embeddings = np.array([
-            global_embeddings[keyword_to_id[kw]]
-            for kw in valid_keywords
-        ])
+    if USE_LOCAL_SBERT:
+        print("[LOCAL EMBEDDING] Building child local SBERT embeddings")
 
-        print("[EMBEDDING] Using GLOBAL SBERT")
-        return valid_keywords, node_embeddings
+        sbert_model = get_sbert_model()
 
-    # Child node -> local SBERT
-    print("[EMBEDDING] Using LOCAL SBERT")
+        local_keywords, local_embeddings = build_local_embeddings_for_node(
+            seed_keywords=valid_child_keywords,
+            keyword_to_id=global_keyword_to_id,
+            global_embeddings=global_embeddings,
+            sbert_model=sbert_model,
+            doc_ids=child_doc_ids,
+            documents=documents,
+        )
 
-    sbert_model = get_sbert_model()
+        save_node_embeddings(
+            local_keywords,
+            local_embeddings,
+            child_embedding_file,
+        )
 
-    local_keywords, local_embeddings = build_local_embeddings_for_node(
-        seed_keywords=seed_keywords,
-        keyword_to_id=keyword_to_id,
-        global_embeddings=global_embeddings,
-        sbert_model=sbert_model,
-        doc_ids=doc_ids,
-        documents=documents,
+        return local_keywords
+
+    child_embeddings = np.array(
+        [
+            global_embeddings[global_keyword_to_id[kw]]
+            for kw in valid_child_keywords
+        ],
+        dtype=np.float32,
     )
 
-    return local_keywords, local_embeddings
+    save_node_embeddings(
+        valid_child_keywords,
+        child_embeddings,
+        child_embedding_file,
+    )
+
+    return valid_child_keywords
 
 
 # ======================================================
-# RECURSIVE TAXOGEN BUILD
+# RECURSIVE BUILD
 # ======================================================
 
 def recursive_build(
@@ -605,9 +640,8 @@ def recursive_build(
     doc_ids,
     seed_keywords,
     documents,
-    all_keywords,
-    keyword_to_id,
-    embeddings,
+    global_keyword_to_id,
+    global_embeddings,
     taxonomy,
     depth,
     max_depth,
@@ -621,61 +655,82 @@ def recursive_build(
         f"docs={len(doc_ids)} keywords={len(seed_keywords)}"
     )
 
-    # ======================================================
-    # TAXOGEN-STYLE NODE FILES: BEFORE SPLIT
-    # ======================================================
     write_doc_ids(doc_ids, os.path.join(node_dir, "doc_ids.txt"))
     write_seed_keywords(seed_keywords, os.path.join(node_dir, "seed_keywords.txt"))
     write_lines(seed_keywords, os.path.join(node_dir, "keywords.txt"))
-    save_node_text(doc_ids=doc_ids, documents=documents, path=os.path.join(node_dir, "text"))
+    save_node_text(
+        doc_ids=doc_ids,
+        documents=documents,
+        path=os.path.join(node_dir, "text"),
+    )
 
-    # ======================================================
-    # STOP CONDITIONS
-    # ======================================================
+    node_embedding_file = os.path.join(node_dir, "embeddings.txt")
+
+    if depth == 0 and not os.path.exists(node_embedding_file):
+        root_keywords = [
+            kw for kw in seed_keywords
+            if kw in global_keyword_to_id
+        ]
+
+        root_embeddings = np.array(
+            [
+                global_embeddings[global_keyword_to_id[kw]]
+                for kw in root_keywords
+            ],
+            dtype=np.float32,
+        )
+
+        print("[EMBEDDING] Saving ROOT global embeddings")
+        save_node_embeddings(
+            root_keywords,
+            root_embeddings,
+            node_embedding_file,
+        )
+
     if depth >= max_depth:
         print(f"[STOP] {node_name}: reach max_depth")
-        save_score_files([], os.path.join(node_dir, "keywords.txt-score.txt"), os.path.join(node_dir, "caseolap.txt"))
-        save_node_embeddings([], np.array([]), os.path.join(node_dir, "embeddings.txt"))
+        save_score_files(
+            [],
+            os.path.join(node_dir, "keywords.txt-score.txt"),
+            os.path.join(node_dir, "caseolap.txt"),
+        )
         return
 
     if len(seed_keywords) < min_cluster_size * 2:
         print(f"[STOP] {node_name}: too few keywords")
-        save_score_files([], os.path.join(node_dir, "keywords.txt-score.txt"), os.path.join(node_dir, "caseolap.txt"))
-        save_node_embeddings([], np.array([]), os.path.join(node_dir, "embeddings.txt"))
+        save_score_files(
+            [],
+            os.path.join(node_dir, "keywords.txt-score.txt"),
+            os.path.join(node_dir, "caseolap.txt"),
+        )
         return
 
     if len(doc_ids) < 20:
         print(f"[STOP] {node_name}: too few documents")
-        save_score_files([], os.path.join(node_dir, "keywords.txt-score.txt"), os.path.join(node_dir, "caseolap.txt"))
-        save_node_embeddings([], np.array([]), os.path.join(node_dir, "embeddings.txt"))
+        save_score_files(
+            [],
+            os.path.join(node_dir, "keywords.txt-score.txt"),
+            os.path.join(node_dir, "caseolap.txt"),
+        )
         return
 
-    # ======================================================
-    # GLOBAL / LOCAL EMBEDDING
-    # ======================================================
-    valid_keywords, node_embeddings = get_node_embeddings(
-        depth=depth,
-        doc_ids=doc_ids,
+    valid_keywords, node_embeddings = load_node_embeddings(
         seed_keywords=seed_keywords,
-        documents=documents,
-        keyword_to_id=keyword_to_id,
-        global_embeddings=embeddings,
+        node_embedding_file=node_embedding_file,
         min_cluster_size=min_cluster_size,
     )
 
-    if len(valid_keywords) < min_cluster_size * 2:
-        print(f"[STOP] {node_name}: too few valid keywords")
-        save_score_files([], os.path.join(node_dir, "keywords.txt-score.txt"), os.path.join(node_dir, "caseolap.txt"))
-        save_node_embeddings(valid_keywords, node_embeddings, os.path.join(node_dir, "embeddings.txt"))
+    if len(valid_keywords) < min_cluster_size * 2 or len(node_embeddings) == 0:
+        print(f"[STOP] {node_name}: too few valid keywords in node embeddings")
+        save_score_files(
+            [],
+            os.path.join(node_dir, "keywords.txt-score.txt"),
+            os.path.join(node_dir, "caseolap.txt"),
+        )
         return
 
-    # Tính node stats một lần để dùng cho BM25 trong adaptive + labeling.
     node_stats = build_node_keyword_stats(doc_ids, documents)
 
-    # ======================================================
-    # ADAPTIVE CLUSTERING LOOP
-    # cluster -> BM25+Cosine filter -> recluster
-    # ======================================================
     labels = None
 
     for iter_id in range(N_CLUSTER_ITER):
@@ -693,11 +748,14 @@ def recursive_build(
         )
 
         if labels is None:
-            print(f"[STOP] {node_name}: clustering failed in adaptive loop")
-            save_score_files([], os.path.join(node_dir, "keywords.txt-score.txt"), os.path.join(node_dir, "caseolap.txt"))
+            print(f"[STOP] {node_name}: clustering failed")
+            save_score_files(
+                [],
+                os.path.join(node_dir, "keywords.txt-score.txt"),
+                os.path.join(node_dir, "caseolap.txt"),
+            )
             return
 
-        # Vòng cuối không lọc nữa; labels cuối dùng để tạo child.
         if iter_id < N_CLUSTER_ITER - 1:
             old_n = len(valid_keywords)
 
@@ -712,39 +770,50 @@ def recursive_build(
                 node_stats=node_stats,
             )
 
-            print(f"[ADAPTIVE] filtered keywords: {old_n} -> {len(valid_keywords)}")
+            print(
+                f"[ADAPTIVE] filtered keywords: "
+                f"{old_n} -> {len(valid_keywords)}"
+            )
+
+            save_node_embeddings(
+                valid_keywords,
+                node_embeddings,
+                node_embedding_file,
+            )
 
             if len(valid_keywords) < min_cluster_size * 2:
-                print(f"[STOP] {node_name}: too few keywords after adaptive filtering")
-                save_score_files([], os.path.join(node_dir, "keywords.txt-score.txt"), os.path.join(node_dir, "caseolap.txt"))
-                save_node_embeddings(valid_keywords, node_embeddings, os.path.join(node_dir, "embeddings.txt"))
+                print(f"[STOP] {node_name}: too few keywords after filtering")
+                save_score_files(
+                    [],
+                    os.path.join(node_dir, "keywords.txt-score.txt"),
+                    os.path.join(node_dir, "caseolap.txt"),
+                )
                 return
 
-    # Ghi lại keywords/embeddings sau adaptive filtering.
     write_lines(valid_keywords, os.path.join(node_dir, "keywords.txt"))
-    save_node_embeddings(valid_keywords, node_embeddings, os.path.join(node_dir, "embeddings.txt"))
+    save_node_embeddings(valid_keywords, node_embeddings, node_embedding_file)
 
-    # ======================================================
-    # BUILD CLUSTER MAP FROM FINAL LABELS
-    # ======================================================
     cluster_map = defaultdict(list)
 
     for kw, label in zip(valid_keywords, labels):
         label = int(label)
-        if label == -1:
-            continue
-        cluster_map[label].append(kw)
+        if label != -1:
+            cluster_map[label].append(kw)
 
     if len(cluster_map) == 0:
         print(f"[STOP] {node_name}: all noise")
-        save_score_files([], os.path.join(node_dir, "keywords.txt-score.txt"), os.path.join(node_dir, "caseolap.txt"))
+        save_score_files(
+            [],
+            os.path.join(node_dir, "keywords.txt-score.txt"),
+            os.path.join(node_dir, "caseolap.txt"),
+        )
         return
 
-    node_keyword_to_id = {kw: idx for idx, kw in enumerate(valid_keywords)}
+    node_keyword_to_id = {
+        kw: idx
+        for idx, kw in enumerate(valid_keywords)
+    }
 
-    # ======================================================
-    # OUTPUT FILES
-    # ======================================================
     hierarchy_file = os.path.join(node_dir, "hierarchy.txt")
     cluster_keyword_file = os.path.join(node_dir, "cluster_keywords.txt")
     paper_cluster_file = os.path.join(node_dir, "paper_cluster.txt")
@@ -766,6 +835,7 @@ def recursive_build(
          open(paper_cluster_file, "w", encoding="utf-8") as pcf:
 
         for cluster_id in sorted(cluster_map.keys()):
+
             child_folder_name, representative = choose_node_label(
                 cluster_id=cluster_id,
                 cluster_keywords=cluster_map[cluster_id],
@@ -797,15 +867,13 @@ def recursive_build(
             else:
                 child_node_name = f"{node_name}/{child_folder_name}"
 
-            # hierarchy.txt: child parent
             hf.write(f"{child_folder_name} {node_name}\n")
 
-            # cluster_keywords.txt
             for kw in cluster_map[cluster_id]:
                 ckf.write(f"{cluster_id}\t{kw}\n")
 
-            # paper_cluster.txt
             child_doc_ids = cluster_docs.get(cluster_id, [])
+
             for doc_id in child_doc_ids:
                 pcf.write(f"{doc_id}\t{cluster_id}\n")
 
@@ -817,16 +885,43 @@ def recursive_build(
             )
 
             child_dir = os.path.join(node_dir, child_folder_name)
+            os.makedirs(child_dir, exist_ok=True)
+
+            child_seed_keywords = cluster_map[cluster_id]
+            child_embedding_file = os.path.join(child_dir, "embeddings.txt")
+
+            child_valid_keywords = build_child_embeddings(
+                child_keywords=child_seed_keywords,
+                child_doc_ids=child_doc_ids,
+                documents=documents,
+                global_keyword_to_id=global_keyword_to_id,
+                global_embeddings=global_embeddings,
+                child_embedding_file=child_embedding_file,
+            )
+
+            write_doc_ids(
+                child_doc_ids,
+                os.path.join(child_dir, "doc_ids.txt"),
+            )
+
+            write_seed_keywords(
+                child_valid_keywords,
+                os.path.join(child_dir, "seed_keywords.txt"),
+            )
+
+            write_lines(
+                child_valid_keywords,
+                os.path.join(child_dir, "keywords.txt"),
+            )
 
             recursive_build(
                 node_dir=child_dir,
                 node_name=child_node_name,
                 doc_ids=child_doc_ids,
-                seed_keywords=cluster_map[cluster_id],
+                seed_keywords=child_valid_keywords,
                 documents=documents,
-                all_keywords=all_keywords,
-                keyword_to_id=keyword_to_id,
-                embeddings=embeddings,
+                global_keyword_to_id=global_keyword_to_id,
+                global_embeddings=global_embeddings,
                 taxonomy=taxonomy,
                 depth=depth + 1,
                 max_depth=max_depth,
@@ -835,7 +930,12 @@ def recursive_build(
             )
 
     all_scores = sorted(all_scores, key=lambda x: x[1], reverse=True)
-    save_score_files(all_scores, score_file, caseolap_file)
+
+    save_score_files(
+        all_scores,
+        score_file,
+        caseolap_file,
+    )
 
 
 # ======================================================
@@ -853,22 +953,46 @@ def build_taxogen_style_tree(
     min_cluster_size=MIN_CLUSTER_SIZE,
     top_k=TOP_K,
 ):
-    documents = [line.split() for line in read_lines(document_file)]
+    documents = [
+        line.split()
+        for line in read_lines(document_file)
+    ]
+
     keywords = read_lines(keyword_file)
+
     embedding_map = load_txt_embeddings(embedding_file)
 
-    keywords = [kw for kw in keywords if kw in embedding_map]
-    embeddings = np.array([embedding_map[kw] for kw in keywords])
-    keyword_to_id = {kw: idx for idx, kw in enumerate(keywords)}
+    keywords = [
+        kw for kw in keywords
+        if kw in embedding_map
+    ]
 
-    if len(keywords) != len(embeddings):
-        raise ValueError("keywords.txt và phrase_embeddings.txt không cùng số lượng.")
+    global_embeddings = np.array(
+        [embedding_map[kw] for kw in keywords],
+        dtype=np.float32,
+    )
+
+    global_keyword_to_id = {
+        kw: idx
+        for idx, kw in enumerate(keywords)
+    }
 
     all_doc_ids = list(range(len(documents)))
 
     os.makedirs(output_tree_dir, exist_ok=True)
     ensure_parent_dir(output_taxonomy_txt)
     ensure_parent_dir(output_taxonomy_json)
+
+    root_embedding_file = os.path.join(
+        output_tree_dir,
+        "embeddings.txt",
+    )
+
+    save_node_embeddings(
+        keywords,
+        global_embeddings,
+        root_embedding_file,
+    )
 
     taxonomy = Taxonomy()
 
@@ -878,9 +1002,8 @@ def build_taxogen_style_tree(
         doc_ids=all_doc_ids,
         seed_keywords=keywords,
         documents=documents,
-        all_keywords=keywords,
-        keyword_to_id=keyword_to_id,
-        embeddings=embeddings,
+        global_keyword_to_id=global_keyword_to_id,
+        global_embeddings=global_embeddings,
         taxonomy=taxonomy,
         depth=0,
         max_depth=max_depth,
