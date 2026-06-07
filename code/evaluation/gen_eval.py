@@ -1,242 +1,494 @@
-# generate the evaluation pairs of different taxonomies
 import argparse
-import utils
-import operator
 import random
-from os import listdir
-from os.path import isfile, join, isdir, abspath, dirname, basename, exists
-from taxonomy import Taxonomy, TNode
+import os
+import sys
+
+from os import listdir, makedirs
+from os.path import isfile, join, basename, exists
+
+ROOT_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..")
+)
+
+sys.path.append(ROOT_DIR)
+
+from common.taxonomy import Taxonomy, TNode
 
 
-def gen_intrusion_pairs(tax, N, case_N):
-	# generate the sibling intrusion set
-	cnt = 0
-
-	pairs = {}
-
-	# exp_file = open('%s_exp' % intru_f, 'w+')
-	# gold_file = open('%s_gold' % intru_f, 'w+')
-
-	while cnt < case_N:
-		node = tax.sample_a_node()
-
-		if node.parent == None:
-			continue
-		sibs = node.get_siblings()
-		if len(sibs) == 0:
-			continue
-		s_node = random.choice(sibs)
-
-		shuf_phs = node.ph_list[:N]
-		cand_phs = s_node.ph_list
-		while True:
-			n_ph = random.choice(cand_phs)
-			if n_ph not in shuf_phs:
-				shuf_phs.append(n_ph)
-				random.shuffle(shuf_phs)
-				exp_line = ','.join(shuf_phs)
-				intr_idx = shuf_phs.index(n_ph)
-				pairs[exp_line] = intr_idx
-				cnt += 1
-				break
-
-	return pairs
-
-
-def gen_isa_pairs(tax, isa_N, case_N):
-	cnt = 0
-	pairs = {}
-
-	while cnt < case_N:
-		node = tax.sample_a_node()
-		rmd_node = tax.sample_a_node()
-		if node.parent == None or node.parent == rmd_node or node.parent.name == '*' \
-			or rmd_node.name == '*':
-			continue
-		p_node = node.parent
-
-		n_phs = '|'.join(node.ph_list[:isa_N])
-		p_phs = '|'.join(p_node.ph_list[:isa_N])
-		rmd_phs = '|'.join(rmd_node.ph_list[:isa_N])
-		if len(p_phs) == 0 or len(rmd_phs) == 0:
-			print tax
-			print n_phs
-			print node.name
-			print p_node.name
-			print rmd_node.name
-			exit(1)
-		order = random.choice([0, 1])
-		p_id = 0
-		if order == 0:
-			exp_line = '%s,%s,%s' % (n_phs, p_phs, rmd_phs)
-		else:
-			exp_line = '%s,%s,%s' % (n_phs, rmd_phs, p_phs)
-			p_id = 1
-		pairs[exp_line] = p_id
-
-		cnt += 1
-	
-	return pairs
-
-
-def gen_subdomain_pairs(tax, isa_N):
-	pairs = {}
-
-	for node_name in tax.all_nodes:
-		node = tax.all_nodes[node_name]
-		if node.name == '*' or node.parent.name == '*':
-			continue
-
-		n_phs = '|'.join(node.ph_list[:isa_N])
-		p_phs = '|'.join(node.parent.ph_list[:isa_N])
-	
-		exp_line = '%s,%s' % (n_phs, p_phs)
-		pairs[exp_line] = node.level
-
-	return pairs
-
+# ======================================================
+# READ TAXONOMY
+# ======================================================
 
 def read_taxonomy(tax_f):
-	root = TNode('*', [])
-	tax = Taxonomy(tax_f, root)
+    root = TNode('*', [])
 
-	with open(tax_f) as f:
-		for line in f:
-			node_name, ph_str = line.strip('\r\n').split('\t')
-			node = TNode(node_name, ph_str.split(','))
-			tax.add_node(node)
+    tax = Taxonomy()
+    tax.root = root
+    tax.all_nodes = {'*': root}
 
-	return tax
+    with open(tax_f, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip('\r\n')
 
-def handler(folder, output, N, isa_N, case_N):
+            if not line:
+                continue
 
-	files = ['%s/%s' % (folder, f) for f in listdir(folder) if isfile(join(folder, f))]
-	taxs = {}
+            if '\t' not in line:
+                continue
 
-	for tax_f in files:
-		method_name = basename(tax_f)
-		taxs[method_name] = read_taxonomy(tax_f)
+            node_name, ph_str = line.split('\t', 1)
 
-	intru_maps = {}
-	isa_maps = {}
-	subdomain_map = {}
+            if node_name == '*':
+                continue
 
-	for tax_name in taxs:
-		print tax_name
-		# generate intrusion pairs
-		# intru_f = '%s/%s.intrusion' % (output, tax_name)
-		intru_maps[tax_name] = gen_intrusion_pairs(taxs[tax_name], N, case_N)
-		# isa_f = '%s/%s.isa' % (output, tax_name)
-		isa_maps[tax_name] = gen_isa_pairs(taxs[tax_name], isa_N, case_N)
-		subdomain_map[tax_name] = gen_subdomain_pairs(taxs[tax_name], isa_N)
+            ph_list = [
+                p.strip()
+                for p in ph_str.split(',')
+                if p.strip()
+            ]
 
-	# exit(1)
+            if len(ph_list) == 0:
+                continue
 
-	# The intrusion part
-	if True:
-		intru_gold_f = '%s/intrusion_gold.txt' % output
+            node = TNode(node_name, ph_list)
+            tax.add_node(node)
 
-		intru_all = {}
-		for tax_name in taxs:
-			for exp_str  in intru_maps[tax_name]:
-				intru_all[exp_str] = (tax_name, intru_maps[tax_name][exp_str])
-
-		each_voter_n = 80
-		subset_n = 0
-
-		intru_exp_f = '%s/intrusion_exp_%d.csv' % (output, subset_n)
-		g_exp = open(intru_exp_f, 'w+')
-		g_exp.write('0,1,2,3,4,5,outlier id\n')
-		
-		with open(intru_gold_f, 'w+') as g_gold:
-			idx = 0
-			for exp_str in intru_all:
-				g_exp.write('%s\n' % exp_str)
-				g_gold.write('%s\t%s\t%d\n' % (exp_str, intru_all[exp_str][0], intru_all[exp_str][1]))
-
-				idx += 1
-				if idx % each_voter_n == 0:
-					subset_n += 1
-					intru_exp_f = '%s/intrusion_exp_%d.csv' % (output, subset_n)
-					g_exp.close()
-					g_exp = open(intru_exp_f, 'w+')
-					g_exp.write('0,1,2,3,4,5,outlier id\n')
-		g_exp.close()
+    return tax
 
 
-	# The old isa evaluation
-	if False:
-		isa_gold_f = '%s/isa_gold.txt' % output
+# ======================================================
+# TOPIC INTRUSION
+# ======================================================
 
-		intru_all = {}
-		for tax_name in taxs:
-			for exp_str  in isa_maps[tax_name]:
-				intru_all[exp_str] = (tax_name, isa_maps[tax_name][exp_str])
+def gen_intrusion_pairs(tax, N, case_N):
+    cnt = 0
+    pairs = {}
 
-		each_voter_n = 125
-		subset_n = 0
+    max_attempts = case_N * 1000
+    attempts = 0
 
-		intru_exp_f = '%s/isa_exp_%d.csv' % (output, subset_n)
-		g_exp = open(intru_exp_f, 'w+')
-		g_exp.write(',0,1,parent id\n')
-		
-		with open(isa_gold_f, 'w+') as g_gold:
-			idx = 0
-			for exp_str in intru_all:
-				g_exp.write('%s\n' % exp_str)
-				g_gold.write('%s\t%s\t%d\n' % (exp_str, intru_all[exp_str][0], intru_all[exp_str][1]))
+    while cnt < case_N and attempts < max_attempts:
+        attempts += 1
 
-				idx += 1
-				if idx % each_voter_n == 0:
-					subset_n += 1
-					intru_exp_f = '%s/isa_exp_%d.csv' % (output, subset_n)
-					g_exp.close()
-					g_exp = open(intru_exp_f, 'w+')
-					g_exp.write(',0,1,parent id\n')
+        node = tax.sample_a_node()
+
+        if node.parent is None:
+            continue
+
+        siblings = node.get_siblings()
+
+        if len(siblings) == 0:
+            continue
+
+        if len(node.ph_list) < N:
+            continue
+
+        sibling = random.choice(siblings)
+
+        if len(sibling.ph_list) == 0:
+            continue
+
+        shuf_phs = list(node.ph_list[:N])
+
+        cand_phs = [
+            ph for ph in sibling.ph_list
+            if ph not in shuf_phs
+        ]
+
+        if len(cand_phs) == 0:
+            continue
+
+        intruder = random.choice(cand_phs)
+
+        shuf_phs.append(intruder)
+        random.shuffle(shuf_phs)
+
+        exp_line = ','.join(shuf_phs)
+        intr_idx = shuf_phs.index(intruder)
+
+        if exp_line not in pairs:
+            pairs[exp_line] = intr_idx
+            cnt += 1
+
+    if cnt < case_N:
+        print(f'[WARN] gen_intrusion_pairs: chỉ tạo được {cnt}/{case_N} pairs')
+
+    return pairs
 
 
-	if True:
-		sub_gold_f = '%s/subdomain_gold.txt' % output
+# ======================================================
+# PARENT-CHILD / SUBDOMAIN Y-N TASK
+# ======================================================
 
-		intru_all = {}
-		for tax_name in taxs:
-			for exp_str  in subdomain_map[tax_name]:
-				intru_all[exp_str] = (tax_name, subdomain_map[tax_name][exp_str])
+def gen_subdomain_pairs(tax, isa_N, case_N):
+    """
+    Sinh parent-child pairs dạng:
 
-		each_voter_n = 80
-		subset_n = 0
+        child_terms,parent_terms
 
-		intru_exp_f = '%s/subdomain_exp_%d.csv' % (output, subset_n)
-		g_exp = open(intru_exp_f, 'w+')
-		g_exp.write('child,parent,y or n?\n')
-		
-		with open(sub_gold_f, 'w+') as g_gold:
-			idx = 0
-			for exp_str in intru_all:
-				g_exp.write('%s\n' % exp_str)
-				g_gold.write('%s\t%s\t%d\n' % (exp_str, intru_all[exp_str][0], intru_all[exp_str][1]))
+    Người đánh giá sẽ điền:
+        y / n
 
-				idx += 1
-				if idx % each_voter_n == 0:
-					subset_n += 1
-					intru_exp_f = '%s/subdomain_exp_%d.csv' % (output, subset_n)
-					g_exp.close()
-					g_exp = open(intru_exp_f, 'w+')
-					g_exp.write('child,parent,y or n?\n')
+    Khác bản cũ:
+        - không còn 1 node = 1 pair
+        - random sample nhiều lần để lấy đủ case_N
+        - cùng một node có thể sinh nhiều biến thể keyword khác nhau
+    """
 
+    cnt = 0
+    pairs = {}
+
+    max_attempts = case_N * 1000
+    attempts = 0
+
+    while cnt < case_N and attempts < max_attempts:
+        attempts += 1
+
+        node = tax.sample_a_node()
+
+        if node.name == '*':
+            continue
+
+        if node.parent is None:
+            continue
+
+        # bỏ quan hệ với root vì root không phải topic thật
+        if node.parent.name == '*':
+            continue
+
+        if len(node.ph_list) == 0:
+            continue
+
+        if len(node.parent.ph_list) == 0:
+            continue
+
+        child_terms = random.sample(
+            node.ph_list,
+            min(isa_N, len(node.ph_list))
+        )
+
+        parent_terms = random.sample(
+            node.parent.ph_list,
+            min(isa_N, len(node.parent.ph_list))
+        )
+
+        if len(child_terms) == 0 or len(parent_terms) == 0:
+            continue
+
+        child_phs = '|'.join(child_terms)
+        parent_phs = '|'.join(parent_terms)
+
+        exp_line = f'{child_phs},{parent_phs}'
+
+        if exp_line not in pairs:
+            pairs[exp_line] = node.level
+            cnt += 1
+
+    if cnt < case_N:
+        print(f'[WARN] gen_subdomain_pairs: chỉ tạo được {cnt}/{case_N} pairs')
+
+    return pairs
+
+
+# ======================================================
+# OPTIONAL ISA TASK
+# ======================================================
+
+def gen_isa_pairs(tax, isa_N, case_N):
+    """
+    Task chọn parent đúng trong 2 lựa chọn.
+    Hiện chưa ghi ra CSV trong bản này,
+    nhưng giữ lại nếu sau này muốn dùng paper-style ISA.
+    """
+
+    cnt = 0
+    pairs = {}
+
+    max_attempts = case_N * 1000
+    attempts = 0
+
+    while cnt < case_N and attempts < max_attempts:
+        attempts += 1
+
+        node = tax.sample_a_node()
+        rmd_node = tax.sample_a_node()
+
+        if node.parent is None:
+            continue
+
+        if node.parent.name == '*':
+            continue
+
+        if rmd_node.name == '*':
+            continue
+
+        if node.parent == rmd_node:
+            continue
+
+        p_node = node.parent
+
+        if len(node.ph_list) == 0:
+            continue
+
+        if len(p_node.ph_list) == 0:
+            continue
+
+        if len(rmd_node.ph_list) == 0:
+            continue
+
+        n_phs = '|'.join(node.ph_list[:isa_N])
+        p_phs = '|'.join(p_node.ph_list[:isa_N])
+        rmd_phs = '|'.join(rmd_node.ph_list[:isa_N])
+
+        if not n_phs or not p_phs or not rmd_phs:
+            continue
+
+        order = random.choice([0, 1])
+
+        if order == 0:
+            exp_line = f'{n_phs},{p_phs},{rmd_phs}'
+            p_id = 0
+        else:
+            exp_line = f'{n_phs},{rmd_phs},{p_phs}'
+            p_id = 1
+
+        if exp_line not in pairs:
+            pairs[exp_line] = p_id
+            cnt += 1
+
+    if cnt < case_N:
+        print(f'[WARN] gen_isa_pairs: chỉ tạo được {cnt}/{case_N} pairs')
+
+    return pairs
+
+
+# ======================================================
+# WRITE INTRUSION CSV
+# ======================================================
+
+def write_intrusion(output, intru_maps):
+    intru_gold_f = join(output, 'intrusion_gold.txt')
+
+    intru_all = {}
+
+    for tax_name in intru_maps:
+        for exp_str in intru_maps[tax_name]:
+            intru_all[exp_str] = (
+                tax_name,
+                intru_maps[tax_name][exp_str]
+            )
+
+    each_voter_n = 80
+    subset_n = 0
+    idx = 0
+
+    intru_exp_f = join(output, f'intrusion_exp_{subset_n}.csv')
+
+    g_exp = open(intru_exp_f, 'w+', encoding='utf-8')
+    g_exp.write('0,1,2,3,4,5,outlier id\n')
+
+    with open(intru_gold_f, 'w+', encoding='utf-8') as g_gold:
+        for exp_str in intru_all:
+            g_exp.write(f'{exp_str},\n')
+            g_gold.write(
+                '%s\t%s\t%d\n' %
+                (
+                    exp_str,
+                    intru_all[exp_str][0],
+                    intru_all[exp_str][1]
+                )
+            )
+
+            idx += 1
+
+            if idx % each_voter_n == 0:
+                g_exp.close()
+                subset_n += 1
+                intru_exp_f = join(output, f'intrusion_exp_{subset_n}.csv')
+                g_exp = open(intru_exp_f, 'w+', encoding='utf-8')
+                g_exp.write('0,1,2,3,4,5,outlier id\n')
+
+    g_exp.close()
+
+    print('[SAVE] intrusion_exp_*.csv')
+    print('[SAVE]', intru_gold_f)
+
+
+# ======================================================
+# WRITE SUBDOMAIN CSV
+# ======================================================
+
+def write_subdomain(output, subdomain_map):
+    sub_gold_f = join(output, 'subdomain_gold.txt')
+
+    sub_all = {}
+
+    for tax_name in subdomain_map:
+        for exp_str in subdomain_map[tax_name]:
+            sub_all[exp_str] = (
+                tax_name,
+                subdomain_map[tax_name][exp_str]
+            )
+
+    each_voter_n = 80
+    subset_n = 0
+    idx = 0
+
+    sub_exp_f = join(output, f'subdomain_exp_{subset_n}.csv')
+
+    g_exp = open(sub_exp_f, 'w+', encoding='utf-8')
+    g_exp.write('child,parent,y or n?\n')
+
+    with open(sub_gold_f, 'w+', encoding='utf-8') as g_gold:
+        for exp_str in sub_all:
+            g_exp.write(f'{exp_str},\n')
+            g_gold.write(
+                '%s\t%s\t%d\n' %
+                (
+                    exp_str,
+                    sub_all[exp_str][0],
+                    sub_all[exp_str][1]
+                )
+            )
+
+            idx += 1
+
+            if idx % each_voter_n == 0:
+                g_exp.close()
+                subset_n += 1
+                sub_exp_f = join(output, f'subdomain_exp_{subset_n}.csv')
+                g_exp = open(sub_exp_f, 'w+', encoding='utf-8')
+                g_exp.write('child,parent,y or n?\n')
+
+    g_exp.close()
+
+    print('[SAVE] subdomain_exp_*.csv')
+    print('[SAVE]', sub_gold_f)
+
+
+# ======================================================
+# MAIN HANDLER
+# ======================================================
+
+def handler(
+    folder,
+    output,
+    N,
+    isa_N,
+    intrusion_N,
+    subdomain_N,
+):
+    if not exists(output):
+        makedirs(output)
+
+    files = [
+        join(folder, f)
+        for f in listdir(folder)
+        if isfile(join(folder, f)) and f.endswith('.txt')
+    ]
+
+    taxs = {}
+
+    for tax_f in files:
+        method_name = basename(tax_f)
+
+        print(f'[INFO] Đọc taxonomy: {method_name}')
+
+        taxs[method_name] = read_taxonomy(tax_f)
+
+        n_nodes = len(taxs[method_name].all_nodes)
+
+        print(f'       Số nodes: {n_nodes}')
+
+    if len(taxs) == 0:
+        raise ValueError(f'Không tìm thấy taxonomy .txt trong folder: {folder}')
+
+    intru_maps = {}
+    subdomain_map = {}
+
+    for tax_name in taxs:
+        print(f'\n[GEN] {tax_name}')
+
+        intru_maps[tax_name] = gen_intrusion_pairs(
+            taxs[tax_name],
+            N,
+            intrusion_N
+        )
+
+        subdomain_map[tax_name] = gen_subdomain_pairs(
+            taxs[tax_name],
+            isa_N,
+            subdomain_N
+        )
+
+        print(f'      intrusion pairs : {len(intru_maps[tax_name])}')
+        print(f'      subdomain pairs : {len(subdomain_map[tax_name])}')
+
+    write_intrusion(output, intru_maps)
+    write_subdomain(output, subdomain_map)
+
+    print('\n[DONE] Files đã lưu vào:', output)
+    print('  intrusion_gold.txt, intrusion_exp_*.csv')
+    print('  subdomain_gold.txt, subdomain_exp_*.csv')
+
+
+# ======================================================
+# CLI
+# ======================================================
 
 if __name__ == "__main__":
-	parser = argparse.ArgumentParser(prog='gen_eval.py', \
-			description='generate the evaluation pairs of different taxonomies')
-	parser.add_argument('-folder', required=True, \
-			help='The folder that contains generated taxonomies.')
-	parser.add_argument('-output', required=True, \
-			help='The folder that contains output files.')
-	args = parser.parse_args()
+    parser = argparse.ArgumentParser(
+        prog='gen_eval.py',
+        description='generate evaluation pairs for taxonomies'
+    )
 
-	N = 5 # number of phrase before intrusion
-	isa_N = 5 # number of phrases to represent a node in isa judgement
-	case_N = 49 # number of cases generated for each taxonomy and task
+    parser.add_argument(
+        '-folder',
+        required=True,
+        help='Folder chứa generated taxonomies.'
+    )
 
-	handler(args.folder, args.output, N, isa_N, case_N)
+    parser.add_argument(
+        '-output',
+        required=True,
+        help='Folder chứa output files.'
+    )
 
+    parser.add_argument(
+        '-N',
+        type=int,
+        default=5,
+        help='Số keyword chính trong Topic Intrusion.'
+    )
+
+    parser.add_argument(
+        '-isa_N',
+        type=int,
+        default=5,
+        help='Số keyword đại diện cho child/parent.'
+    )
+
+    parser.add_argument(
+        '-intrusion_N',
+        type=int,
+        default=50,
+        help='Số câu Topic Intrusion.'
+    )
+
+    parser.add_argument(
+        '-subdomain_N',
+        type=int,
+        default=80,
+        help='Số câu Parent-Child.'
+    )
+
+    args = parser.parse_args()
+
+    handler(
+        folder=args.folder,
+        output=args.output,
+        N=args.N,
+        isa_N=args.isa_N,
+        intrusion_N=args.intrusion_N,
+        subdomain_N=args.subdomain_N,
+    )
