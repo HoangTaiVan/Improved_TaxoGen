@@ -374,27 +374,70 @@ machine_learning/deep_learning    cnn,rnn,transformer,...
 
 # Evaluation
 
+The framework supports human evaluation following the original TaxoGen evaluation protocol. The evaluation is performed through a web-based annotation interface and focuses on both taxonomy quality and annotator agreement.
+
+---
+
+## Human Evaluation Web Interface
+
+Annotators use a web-based interface to label sampled taxonomy results. The model names are hidden during evaluation to reduce bias.
+
+<img width="1911" height="1017" alt="Ảnh chụp màn hình 2026-05-31 213846" src="https://github.com/user-attachments/assets/e75b515b-d4c0-4f47-81e4-0ed07428d0e2" />
+
+Web evaluation interface:
+
+https://gannhan.ituhl.org/
+
+The web interface supports two evaluation tasks:
+
+* **Topic Intrusion**: annotators are shown a group of terms from the same taxonomy node mixed with one intruder term. They select the term that does not belong to the topic.
+* **Parent-Child Relationship**: annotators are shown a parent topic and a candidate child topic. They decide whether the child is a valid subtopic of the parent.
+
+---
+
+## Generate Evaluation Files
+
 Generate evaluation files:
 
 ```bash
 py evaluation/gen_eval.py
 ```
 
-Run evaluation:
+This script generates sampled evaluation cases for topic intrusion and parent-child relation evaluation.
+
+---
+
+## Run Evaluation
+
+After annotators complete the labeling process, run:
 
 ```bash
 py evaluation/run_evaluation.py
 ```
 
-Supported metrics:
+The evaluation script computes:
 
-* Fleiss’ Kappa
-* Topic Intrusion
-* Parent–Child Relationship
+* **Topic Intrusion Accuracy**
+* **Parent-Child Relation Accuracy**
+* **Fleiss’ Kappa**
 
-These metrics evaluate both taxonomy quality and annotator agreement.
+These metrics evaluate both taxonomy quality and inter-annotator agreement.
 
 ---
+
+## Evaluation Files
+
+Main generated evaluation files include:
+
+```text
+intrusion_gold.txt
+subdomain_gold.txt
+intrusion_exp_0.csv
+subdomain_exp_0.csv
+```
+
+These files are used by the web annotation interface and the final evaluation script.
+
 
 # Global vs Local Semantic Learning
 
